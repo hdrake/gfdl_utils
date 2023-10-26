@@ -28,6 +28,12 @@ def open_frompp(pp,ppname,out,local,time,add,dmget=False,**kwargs):
         If `out` is av, this could be 'ann' (for annual data)
             or a number corresponding to the month 
             (for monthly climatology)
+    dmget : Bool (default=False)
+        If True, issues dmget command and waits until data has all migrated
+        to disk before attempting to open it with xarray.
+    **kwargs :
+        Any other keyword arguments are passed directly to xarray.open_mfdataset
+
     Returns
     -------
     ds : xarray.Dataset
@@ -172,6 +178,10 @@ def query_ondisk(path):
     return ondisk
 
 def query_all_ondisk(paths):
+    """
+    Determine whether all of the files in [paths], assumed to be a list of lists of paths,
+    have been migrated from tape onto disk. Use `query_ondisk` for more granular queries.
+    """
     return all([all(query_ondisk(path).values()) for path in paths])
 
 def get_ppnames(pp):
