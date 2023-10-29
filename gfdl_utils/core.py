@@ -1,9 +1,22 @@
 import xarray as xr
+import shutil
 import glob
 import os
+import getpass
 import time as time_module
 
-def open_frompp(pp,ppname,out,local,time,add,dmget=False,**kwargs):
+def open_frompp(
+    pp,
+    ppname,
+    out,
+    local,
+    time,
+    add,
+    dmget=False,
+    mirror=False,
+    prefix=f"/vftmp/{getpass.getuser()}",
+    **kwargs
+    ):
     """
     
     Open to a dataset from archive based on details of
@@ -31,6 +44,8 @@ def open_frompp(pp,ppname,out,local,time,add,dmget=False,**kwargs):
     dmget : Bool (default=False)
         If True, issues dmget command and waits until data has all migrated
         to disk before attempting to open it with xarray.
+    mirror : Bool (default=False)
+    prefix : str
     **kwargs :
         Any other keyword arguments are passed directly to xarray.open_mfdataset
 
@@ -40,6 +55,9 @@ def open_frompp(pp,ppname,out,local,time,add,dmget=False,**kwargs):
         Dataset corresponding to data available at path
         
     """
+    if dmget and mirror:
+        raise ValueError("Can not set both `dmget=True` and `mirror=True`.")
+        
     if isinstance(add, str):
         path = get_pathspp(pp,ppname,out,local,time,add)
         paths = glob.glob(path)
@@ -47,17 +65,24 @@ def open_frompp(pp,ppname,out,local,time,add,dmget=False,**kwargs):
         paths = []
         for v in add:
             paths += glob.glob(get_pathspp(pp,ppname,out,local,time,v))
-    if dmget:
-        print("Issuing dmget command to migrate data to disk.", end=" ")
-        issue_dmget(paths)
-        while not(query_all_ondisk(paths)):
-            time_module.sleep(1.)
-        print("Migration complete.")
+            
+    if len(paths) > 0:
+        if dmget:
+            print("Issuing dmget command to migrate data to disk.", end=" ")
+            issue_dmget(paths)
+            while not(query_all_ondisk(paths)):
+                time_module.sleep(1.)
+            print("Migration complete.")
+        elif mirror:
+            print(f"Mirroring paths at {prefix}.", end=" ")
+            mirror_path(paths, prefix=prefix)
+            paths = [f"{prefix}{p}" for p in paths]
+            print("Mirroring complete.")
+        
     return xr.open_mfdataset(paths, use_cftime=True, **kwargs)
 
 def get_pathspp(pp,ppname,out,local,time,add):
     """
-    
     Create a full path based on details of postprocess path
     
     Parameters
@@ -90,7 +115,7 @@ def get_pathspp(pp,ppname,out,local,time,add):
     """
     filename = ".".join([ppname,time,add,'nc'])
     path = "/".join([pp,ppname,out,local,filename])
-    return path
+    return path.replace("//", "/")
 
 def get_pathstatic(pp,ppname):
     """
@@ -142,18 +167,18 @@ def issue_dmget(path):
     Issue a dmget command to the system for the specified path
     """
     if type(path)==list:
-        cmd = ("dmget %s &" %' '.join(path))
+        cmd = f"dmget {' '.join(path)} &"
     elif type(path)==str:
-        cmd = ("dmget %s &" %path)
+        cmd = f"dmget {path} &"
     out = os.system(cmd)
     return out
 
-def query_dmget(user='$USER', out=False):
+def query_dmget(user=getpass.getuser(), out=False):
     """
     Check `dmwho` output for username. Returns 1 when user still in the queue and 0 if queue is `clean`.
     Option `out` prints output of command if not empty
     """
-    cmd = 'dmwho | grep %s' %user
+    cmd = f'dmwho | grep {user}'
     output = os.popen(cmd).read()
     if len(output) == 0:
         return 0
@@ -167,7 +192,7 @@ def query_ondisk(path):
     Determine whether the files associated with [path] have been migrated from tape onto disk.
     Returns a dictionary with keys-value pairs for the path and a boolean: True for disk, False for not.
     """
-    cmd = ("dmls -l %s" %path)
+    cmd = f"dmls -l {path}"
     outputs = os.popen(cmd).read().split('\n')
     ondisk = {}
     for output in outputs[:-1]:
@@ -183,6 +208,33 @@ def query_all_ondisk(paths):
     have been migrated from tape onto disk. Use `query_ondisk` for more granular queries.
     """
     return all([all(query_ondisk(path).values()) for path in paths])
+
+def mirror_path(path, prefix=f"/vftmp/{getpass.getuser()}"):
+    """
+    Mirror all files in `path` to location on PP/AN given by `prefix` kwarg.
+    Skips any files that have already been mirrored there and waits until all
+    copies have completed.
+    """
+    if type(path)==str:
+        path = [path]
+    if type(path)==list:
+        destination = '/'.join(path[0].split("/")[:-1])
+        
+        if not(os.path.isdir(f"{prefix}{destination}")):
+            os.makedirs(f"{prefix}{destination}", exist_ok=True)
+        path_to_copy = [
+            p for p in path
+            if not(os.path.isfile(f"{prefix}{p}")) and not(os.path.isfile(f"{prefix}{p}.gcp"))
+        ]
+        cmd = f"gcp {' '.join(path)} {prefix}{destination}/ &"
+        out = os.system(cmd)
+        path = [f"{prefix}{p}".replace("//","/") for p in path]
+        while any([not(os.path.isfile(p)) for p in path]):
+            time_module.sleep(1.)
+        time_module.sleep(3.)
+    else:
+        raise ValueError("path must be str or list of str.")
+    return path
 
 def get_ppnames(pp):
     """
