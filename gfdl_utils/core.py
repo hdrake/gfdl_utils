@@ -74,7 +74,7 @@ def open_frompp(
                 time_module.sleep(1.)
             print("Migration complete.")
         elif mirror:
-            print(f"Mirroring paths at {prefix}.", end=" ")
+            print(f"Mirroring paths at '{prefix}'.", end=" ")
             mirror_path(paths, prefix=prefix)
             paths = [f"{prefix}{p}" for p in paths]
             print("Mirroring complete.")
@@ -224,14 +224,17 @@ def mirror_path(path, prefix=f"/vftmp/{getpass.getuser()}"):
             os.makedirs(f"{prefix}{destination}", exist_ok=True)
         path_to_copy = [
             p for p in path
-            if not(os.path.isfile(f"{prefix}{p}")) and not(os.path.isfile(f"{prefix}{p}.gcp"))
+            if (not(os.path.isfile(f"{prefix}{p}")) and
+                not(os.path.isfile(f"{prefix}{p}.gcp")))
         ]
-        cmd = f"gcp {' '.join(path)} {prefix}{destination}/ &"
+        time_module.sleep(0.5)
+        cmd = f"gcp --debug {' '.join(path)} {prefix}{destination}/"
+        print(f"Trying command: {cmd}")
         out = os.system(cmd)
         path = [f"{prefix}{p}".replace("//","/") for p in path]
         while any([not(os.path.isfile(p)) for p in path]):
             time_module.sleep(1.)
-        time_module.sleep(3.)
+        time_module.sleep(0.5)
     else:
         raise ValueError("path must be str or list of str.")
     return path
@@ -297,7 +300,7 @@ def get_allvars(pp,verbose=False):
             allvars[ppname]=varnames
     return allvars
 
-def find_variable(pp,variable,verbose=False):
+def find_variable(pp, variable, verbose=False):
     """
     Find the location of a specific variable in the pp folders.
     """
@@ -318,6 +321,34 @@ def find_variable(pp,variable,verbose=False):
         return ppnames
     else:
         print('No '+variable+' in this pp.')
+
+def find_unique_variable(
+        pp,
+        variable,
+        require=[],
+        ignore=[],
+        unique=True
+    ):
+    if type(ignore) is str:
+        ignore = [ignore]
+    if type(require) is str:
+        require = [require]
+    local_list = [
+        e for e in find_variable(pp, variable)
+        if (all([r in e for r in require]) and
+            not any([s in e for s in ignore]))
+    ]
+    if len(local_list)==1:
+        return local_list[0]
+    elif len(local_list)==0:
+        raise ValueError("No variables matching these constraints available.")
+    elif (len(local_list)>1) and unique:
+        raise ValueError("Ambiguous request; more than one ppname"
+                         f"containing variable '{variable}' satisfies"
+                         f"these constraints: {local_list}.")
+    elif (len(local_list)>1) and not(unique):
+        return local_list
+    
         
 def query_is1x1deg(ppname):
     """
