@@ -65,7 +65,7 @@ def open_frompp(
         paths = []
         for v in add:
             paths += glob.glob(get_pathspp(pp,ppname,out,local,time,v))
-            
+
     if len(paths) > 0:
         if dmget:
             print("Issuing dmget command to migrate data to disk.", end=" ")
