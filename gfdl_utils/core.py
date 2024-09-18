@@ -78,7 +78,7 @@ def open_frompp(
             mirror_path(paths, prefix=prefix)
             paths = [f"{prefix}{p}" for p in paths]
             print("Mirroring complete.")
-        
+
     return xr.open_mfdataset(paths, use_cftime=True, **kwargs)
 
 def get_pathspp(pp,ppname,out,local,time,add):
@@ -245,12 +245,14 @@ def get_ppnames(pp):
     """
     return os.listdir(pp+'/')
 
-def get_local(pp,ppname,out):
+def get_local(pp,ppname,out,local1priority="monthly",local2priority="5yr"):
     """
     Retrieve an unknown local file path in pp subdirectory.
     """
-    local1 = os.listdir('/'.join([pp,ppname,out]))[0]
-    local2 = os.listdir('/'.join([pp,ppname,out,local1]))[0]
+    local1 = os.listdir('/'.join([pp,ppname,out]))
+    local1 = local1priority if local1priority in local1 else local1[-1]
+    local2 = os.listdir('/'.join([pp,ppname,out,local1]))
+    local2 = local2priority if local2priority in local2 else local2[-1]
     return '/'.join([local1,local2])
 
 def get_timefrequency(pp,ppname):
