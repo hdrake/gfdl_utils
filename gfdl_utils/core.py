@@ -71,7 +71,7 @@ def open_frompp(
             print("Issuing dmget command to migrate data to disk.", end=" ")
             issue_dmget(paths)
             while not(query_all_ondisk(paths)):
-                time_module.sleep(1.)
+                time_module.sleep(0.1)
             print("Migration complete.")
         elif mirror:
             print(f"Mirroring paths at '{prefix}'.", end=" ")
@@ -227,14 +227,14 @@ def mirror_path(path, prefix=f"/vftmp/{getpass.getuser()}"):
             if (not(os.path.isfile(f"{prefix}{p}")) and
                 not(os.path.isfile(f"{prefix}{p}.gcp")))
         ]
-        time_module.sleep(0.5)
+        time_module.sleep(0.1)
         cmd = f"gcp --debug {' '.join(path)} {prefix}{destination}/"
         print(f"Trying command: {cmd}")
         out = os.system(cmd)
         path = [f"{prefix}{p}".replace("//","/") for p in path]
         while any([not(os.path.isfile(p)) for p in path]):
-            time_module.sleep(1.)
-        time_module.sleep(0.5)
+            time_module.sleep(0.1)
+        time_module.sleep(0.1)
     else:
         raise ValueError("path must be str or list of str.")
     return path
