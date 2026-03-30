@@ -35,19 +35,27 @@ def open_frompp(
         Commonly e.g. annual/5yr or annual_5yr
     time : str
         Time string
-    add : str
+    add : str or list of str
         Additional string in filename
-        If `out` is ts, this would be the variable name
+        
+        If `out` is ts, this would be the variable name.
         If `out` is av, this could be 'ann' (for annual data)
-            or a number corresponding to the month 
-            (for monthly climatology)
+        or a number corresponding to the month 
+        (for monthly climatology).
+        
+        If a list is provided, each variable is opened
+        independently and then merged into a single dataset.
+        This avoids expensive multi-variable concatenation
+        logic in xarray.open_mfdataset.
+        
     dmget : Bool (default=False)
         If True, issues dmget command and waits until data has all migrated
         to disk before attempting to open it with xarray.
     mirror : Bool (default=False)
     prefix : str
     **kwargs :
-        Any other keyword arguments are passed directly to xarray.open_mfdataset
+        Any other keyword arguments are passed directly to
+        xarray.open_mfdataset
 
     Returns
     -------
@@ -57,29 +65,82 @@ def open_frompp(
     """
     if dmget and mirror:
         raise ValueError("Can not set both `dmget=True` and `mirror=True`.")
-        
+
+    def _prepare_paths(var):
+        path = get_pathspp(pp, ppname, out, local, time, var)
+        paths = sorted(glob.glob(path))
+
+        if len(paths) > 0:
+            if dmget:
+                print(f"Issuing dmget command to migrate {var} data to disk.", end=" ")
+                issue_dmget(paths)
+                while not query_all_ondisk(paths):
+                    time_module.sleep(0.1)
+                print("Migration complete.")
+
+            elif mirror:
+                print(f"Mirroring paths for {var} data at '{prefix}'.", end=" ")
+                mirror_path(paths, prefix=prefix)
+                paths = [f"{prefix}{p}" for p in paths]
+                print("Mirroring complete.")
+
+        return paths
+
+    # -----------------------------
+    # Single variable
+    # -----------------------------
     if isinstance(add, str):
-        path = get_pathspp(pp,ppname,out,local,time,add)
-        paths = glob.glob(path)
+
+        paths = _prepare_paths(add)
+
+        if len(paths) == 0:
+            raise FileNotFoundError(
+                f"No files found for variable '{add}' "
+                f"with time pattern '{time}'."
+            )
+
+        return xr.open_mfdataset(
+            paths,
+            use_cftime=True,
+            combine="nested",
+            concat_dim="time",
+            **kwargs,
+        )
+
+    # -----------------------------
+    # Multiple variables
+    # -----------------------------
     elif isinstance(add, list):
-        paths = []
-        for v in add:
-            paths += glob.glob(get_pathspp(pp,ppname,out,local,time,v))
 
-    if len(paths) > 0:
-        if dmget:
-            print("Issuing dmget command to migrate data to disk.", end=" ")
-            issue_dmget(paths)
-            while not(query_all_ondisk(paths)):
-                time_module.sleep(0.1)
-            print("Migration complete.")
-        elif mirror:
-            print(f"Mirroring paths at '{prefix}'.", end=" ")
-            mirror_path(paths, prefix=prefix)
-            paths = [f"{prefix}{p}" for p in paths]
-            print("Mirroring complete.")
+        datasets = []
 
-    return xr.open_mfdataset(paths, use_cftime=True, **kwargs)
+        for var in add:
+
+            paths = _prepare_paths(var)
+
+            if len(paths) == 0:
+                raise FileNotFoundError(
+                    f"No files found for variable '{var}' "
+                    f"with time pattern '{time}'."
+                )
+
+            ds_var = xr.open_mfdataset(
+                paths,
+                use_cftime=True,
+                combine="nested",
+                concat_dim="time",
+                **kwargs,
+            )
+
+            datasets.append(ds_var)
+
+        return xr.merge(datasets, compat="override")
+
+    else:
+
+        raise TypeError(
+            "`add` must be a string or list of strings."
+        )
 
 def get_pathspp(pp,ppname,out,local,time,add):
     """
@@ -140,7 +201,7 @@ def get_pathstatic(pp,ppname):
     path = "/".join([pp,ppname,static])
     return path
 
-def open_static(pp,ppname):
+def open_static(pp,ppname,dmget=False):
     """
     
     Get the path to the static grid file associated with
@@ -159,8 +220,14 @@ def open_static(pp,ppname):
         Static grid file dataset
         
     """
-    ds = get_pathstatic(pp,ppname)
-    return xr.open_dataset(ds)
+    ds_path = get_pathstatic(pp,ppname)
+    if dmget:
+        print("Issuing dmget command to migrate data to disk.", end=" ")
+        issue_dmget([ds_path])
+        while not(query_all_ondisk([ds_path])):
+            time_module.sleep(0.1)
+        print("Migration complete.")
+    return xr.open_dataset(ds_path)
 
 def issue_dmget(path):
     """
