@@ -38,15 +38,7 @@ def open_frompp(
     add : str or list of str
         Additional string in filename
         
-        If `out` is ts, this would be the variable name.
-        If `out` is av, this could be 'ann' (for annual data)
-        or a number corresponding to the month 
-        (for monthly climatology).
-        
-        If a list is provided, each variable is opened
-        independently and then merged into a single dataset.
-        This avoids expensive multi-variable concatenation
-        logic in xarray.open_mfdataset.
+        If `add='*'`, all available matching variables are opened.
         
     dmget : Bool (default=False)
         If True, issues dmget command and waits until data has all migrated
@@ -60,87 +52,141 @@ def open_frompp(
     Returns
     -------
     ds : xarray.Dataset
-        Dataset corresponding to data available at path
         
     """
+
     if dmget and mirror:
         raise ValueError("Can not set both `dmget=True` and `mirror=True`.")
 
-    def _prepare_paths(var):
-        path = get_pathspp(pp, ppname, out, local, time, var)
-        paths = sorted(glob.glob(path))
+    # -------------------------------------------------
+    # Discover variables
+    # -------------------------------------------------
 
-        if len(paths) > 0:
-            if dmget:
-                print(f"Issuing dmget command to migrate {var} data to disk.", end=" ")
-                issue_dmget(paths)
-                while not query_all_ondisk(paths):
-                    time_module.sleep(0.1)
-                print("Migration complete.")
+    def _discover_available_vars():
 
-            elif mirror:
-                print(f"Mirroring paths for {var} data at '{prefix}'.", end=" ")
-                mirror_path(paths, prefix=prefix)
-                paths = [f"{prefix}{p}" for p in paths]
-                print("Mirroring complete.")
+        allvars = get_varnames(pp, ppname)
 
-        return paths
+        if allvars is None:
+            return []
 
-    # -----------------------------
-    # Single variable
-    # -----------------------------
-    if isinstance(add, str):
+        matched = []
 
-        paths = _prepare_paths(add)
+        for var in allvars:
+            paths = glob.glob(
+                get_pathspp(pp, ppname, out, local, time, var)
+            )
 
-        if len(paths) == 0:
+            if len(paths) > 0:
+                matched.append(var)
+
+        return sorted(matched)
+
+    if add == "*":
+        add = _discover_available_vars()
+
+        if len(add) == 0:
             raise FileNotFoundError(
-                f"No files found for variable '{add}' "
+                f"No files found for wildcard add='*' "
                 f"with time pattern '{time}'."
             )
 
-        return xr.open_mfdataset(
-            paths,
-            use_cftime=True,
-            combine="nested",
-            concat_dim="time",
-            **kwargs,
+    if isinstance(add, str):
+        add = [add]
+
+    if not isinstance(add, list):
+        raise TypeError("`add` must be a string or list of strings.")
+
+    # -------------------------------------------------
+    # Collect paths for all variables first
+    # -------------------------------------------------
+
+    paths_by_var = {}
+    all_paths = []
+
+    for var in add:
+
+        paths = sorted(
+            glob.glob(
+                get_pathspp(pp, ppname, out, local, time, var)
+            )
         )
 
-    # -----------------------------
-    # Multiple variables
-    # -----------------------------
-    elif isinstance(add, list):
-
-        datasets = []
-
-        for var in add:
-
-            paths = _prepare_paths(var)
-
-            if len(paths) == 0:
-                raise FileNotFoundError(
-                    f"No files found for variable '{var}' "
-                    f"with time pattern '{time}'."
-                )
-
-            ds_var = xr.open_mfdataset(
-                paths,
-                use_cftime=True,
-                combine="nested",
-                concat_dim="time",
-                **kwargs,
+        if len(paths) == 0:
+            raise FileNotFoundError(
+                f"No files found for variable '{var}' "
+                f"with time pattern '{time}'."
             )
 
-            datasets.append(ds_var)
+        paths_by_var[var] = paths
+        all_paths.extend(paths)
 
-        return xr.merge(datasets, compat="override")
+    # -------------------------------------------------
+    # Single dmget call
+    # -------------------------------------------------
 
-    else:
+    if dmget:
 
-        raise TypeError(
-            "`add` must be a string or list of strings."
+        var_string = ", ".join(add)
+
+        print(
+            f"Issuing dmget for variables: {var_string}.",
+            end=" "
         )
+
+        issue_dmget(all_paths)
+
+        while not query_all_ondisk(all_paths):
+            time_module.sleep(0.1)
+
+        print("Migration complete.")
+
+    elif mirror:
+
+        print(f"Mirroring paths at '{prefix}'.", end=" ")
+
+        mirror_path(all_paths, prefix=prefix)
+
+        for var in add:
+            paths_by_var[var] = [
+                f"{prefix}{p}"
+                for p in paths_by_var[var]
+            ]
+
+        print("Mirroring complete.")
+
+    # -------------------------------------------------
+    # Open datasets
+    # -------------------------------------------------
+
+    datasets = []
+
+    for var in add:
+
+        open_kwargs = dict(kwargs)
+
+        open_kwargs["combine"] = "nested"
+        open_kwargs["concat_dim"] = "time"
+        open_kwargs["coords"] = "minimal"
+        open_kwargs["data_vars"] = "minimal"
+        open_kwargs["compat"] = "override"
+        open_kwargs.setdefault("join", "outer")
+
+        ds_var = xr.open_mfdataset(
+            paths_by_var[var],
+            use_cftime=True,
+            **open_kwargs,
+        )
+
+        datasets.append(ds_var)
+
+    if len(datasets) == 1:
+        return datasets[0]
+
+    return xr.merge(
+        datasets,
+        compat="override",
+        join="outer",
+    )
 
 def get_pathspp(pp,ppname,out,local,time,add):
     """
