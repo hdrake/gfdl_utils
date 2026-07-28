@@ -13,6 +13,7 @@ def open_frompp(
     time,
     add,
     dmget=False,
+    dmget_timeout=10800,
     mirror=False,
     prefix=f"/vftmp/{getpass.getuser()}",
     **kwargs
@@ -43,6 +44,11 @@ def open_frompp(
     dmget : Bool (default=False)
         If True, issues dmget command and waits until data has all migrated
         to disk before attempting to open it with xarray.
+    dmget_timeout : float or None (default=10800)
+        Maximum number of seconds to wait for the dmget migration to complete
+        before raising a TimeoutError. The generous default (3 hours) is meant
+        to accommodate legitimate long tape recalls. Pass None to wait
+        indefinitely (the historical behavior).
     mirror : Bool (default=False)
     prefix : str
     **kwargs :
@@ -135,8 +141,7 @@ def open_frompp(
 
         issue_dmget(all_paths)
 
-        while not query_all_ondisk(all_paths):
-            time_module.sleep(0.1)
+        wait_until_ondisk(all_paths, dmget_timeout=dmget_timeout)
 
         print("Migration complete.")
 
@@ -247,7 +252,7 @@ def get_pathstatic(pp,ppname):
     path = "/".join([pp,ppname,static])
     return path
 
-def open_static(pp,ppname,dmget=False):
+def open_static(pp,ppname,dmget=False,dmget_timeout=10800):
     """
     
     Get the path to the static grid file associated with
@@ -270,8 +275,7 @@ def open_static(pp,ppname,dmget=False):
     if dmget:
         print("Issuing dmget command to migrate data to disk.", end=" ")
         issue_dmget([ds_path])
-        while not(query_all_ondisk([ds_path])):
-            time_module.sleep(0.1)
+        wait_until_ondisk([ds_path], dmget_timeout=dmget_timeout)
         print("Migration complete.")
     return xr.open_dataset(ds_path)
 
@@ -284,6 +288,8 @@ def issue_dmget(path):
     elif type(path)==str:
         cmd = f"dmget {path} &"
     out = os.system(cmd)
+    if out != 0:
+        print(f"Warning: dmget launch returned nonzero exit code {out} for command: {cmd}")
     return out
 
 def query_dmget(user=getpass.getuser(), out=False):
@@ -308,7 +314,9 @@ def query_ondisk(path):
     cmd = f"dmls -l {path}"
     outputs = os.popen(cmd).read().split('\n')
     ondisk = {}
-    for output in outputs[:-1]:
+    for output in outputs:
+        if output.strip() == "":
+            continue
         if ('(REG)' in output) or ('(DUL)' in output):
             ondisk[output.split(' ')[-1]]=True
         else:
@@ -317,10 +325,44 @@ def query_ondisk(path):
 
 def query_all_ondisk(paths):
     """
-    Determine whether all of the files in [paths], assumed to be a list of lists of paths,
-    have been migrated from tape onto disk. Use `query_ondisk` for more granular queries.
+    Determine whether all of the files in [paths] have been migrated from tape onto
+    disk. `paths` is an iterable of path strings, each of which is passed to
+    `query_ondisk` (use `query_ondisk` directly for more granular queries).
+
+    A path whose `query_ondisk` returns an empty dict (e.g. a failed or unparseable
+    `dmls` result) is treated as NOT on disk, so callers keep waiting rather than
+    proceeding on a vacuously-true `all([])` result.
     """
-    return all([all(query_ondisk(path).values()) for path in paths])
+    return all([all(d.values()) if d else False
+                for d in [query_ondisk(path) for path in paths]])
+
+def wait_until_ondisk(paths, dmget_timeout=10800):
+    """
+    Block until all files in `paths` are resident on disk, polling `query_all_ondisk`
+    with an exponential backoff (starting at 0.1 s, growing by 1.5x up to 5 s) so a
+    long recall does not spawn a flood of `dmls` subprocesses.
+
+    If `dmget_timeout` is not None and the elapsed wait exceeds it (in seconds), raise
+    a TimeoutError naming how many files are still offline along with a couple of
+    example offline paths. Pass `dmget_timeout=None` to wait indefinitely.
+    """
+    start = time_module.time()
+    delay = 0.1
+    while not query_all_ondisk(paths):
+        if (dmget_timeout is not None and
+                (time_module.time() - start) > dmget_timeout):
+            offline = [
+                path for path in paths
+                if not all(query_ondisk(path).values() or [False])
+            ]
+            examples = ", ".join(offline[:2])
+            raise TimeoutError(
+                f"Timed out after {dmget_timeout} seconds waiting for dmget "
+                f"migration to disk: {len(offline)} of {len(paths)} paths still "
+                f"offline (e.g. {examples})."
+            )
+        time_module.sleep(delay)
+        delay = min(delay * 1.5, 5.0)
 
 def mirror_path(path, prefix=f"/vftmp/{getpass.getuser()}"):
     """
