@@ -284,6 +284,8 @@ def issue_dmget(path):
     elif type(path)==str:
         cmd = f"dmget {path} &"
     out = os.system(cmd)
+    if out != 0:
+        print(f"Warning: dmget launch returned nonzero exit code {out} for command: {cmd}")
     return out
 
 def query_dmget(user=getpass.getuser(), out=False):
@@ -308,7 +310,9 @@ def query_ondisk(path):
     cmd = f"dmls -l {path}"
     outputs = os.popen(cmd).read().split('\n')
     ondisk = {}
-    for output in outputs[:-1]:
+    for output in outputs:
+        if output.strip() == "":
+            continue
         if ('(REG)' in output) or ('(DUL)' in output):
             ondisk[output.split(' ')[-1]]=True
         else:
@@ -319,8 +323,13 @@ def query_all_ondisk(paths):
     """
     Determine whether all of the files in [paths], assumed to be a list of lists of paths,
     have been migrated from tape onto disk. Use `query_ondisk` for more granular queries.
+
+    A path whose `query_ondisk` returns an empty dict (e.g. a failed or unparseable
+    `dmls` result) is treated as NOT on disk, so callers keep waiting rather than
+    proceeding on a vacuously-true `all([])` result.
     """
-    return all([all(query_ondisk(path).values()) for path in paths])
+    return all([all(d.values()) if d else False
+                for d in [query_ondisk(path) for path in paths]])
 
 def mirror_path(path, prefix=f"/vftmp/{getpass.getuser()}"):
     """
