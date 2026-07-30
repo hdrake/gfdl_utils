@@ -1,519 +1,131 @@
-import xarray as xr
-import shutil
-import glob
-import os
-import getpass
-import time as time_module
+"""Backwards-compatible facade over the ``gfdl_utils`` subpackages.
 
-def open_frompp(
-    pp,
-    ppname,
-    out,
-    local,
-    time,
-    add,
-    dmget=False,
-    dmget_timeout=10800,
-    mirror=False,
-    prefix=f"/vftmp/{getpass.getuser()}",
-    **kwargs
-    ):
-    """
-    
-    Open to a dataset from archive based on details of
-    postprocess path
-    
-    Parameters
-    ----------
-    pp : str
-        Path to postprocess directory
-    ppname : str
-        Name of postrocess file
-    out : str
-        Averaging of postprocess (ts or av)
-    local : str
-        Details of local file structure
-        Commonly e.g. annual/5yr or annual_5yr
-    time : str
-        Time string
-    add : str or list of str
-        Additional string in filename
-        
-        If `add='*'`, all available matching variables are opened.
-        
-    dmget : Bool (default=False)
-        If True, issues dmget command and waits until data has all migrated
-        to disk before attempting to open it with xarray.
-    dmget_timeout : float or None (default=10800)
-        Maximum number of seconds to wait for the dmget migration to complete
-        before raising a TimeoutError. The generous default (3 hours) is meant
-        to accommodate legitimate long tape recalls. Pass None to wait
-        indefinitely (the historical behavior).
-    mirror : Bool (default=False)
-    prefix : str
-    **kwargs :
-        Any other keyword arguments are passed directly to
-        xarray.open_mfdataset
+``gfdl_utils.core`` used to be the whole package.  It is now a thin re-export
+layer so that existing code (``from gfdl_utils.core import open_frompp``,
+``gu.core.get_pathspp(...)``) keeps working unchanged, while the
+implementation lives in focused modules:
 
-    Returns
-    -------
-    ds : xarray.Dataset
-        
-    """
+:mod:`gfdl_utils.dmf`
+    the DMF/tape layer (``dmls``/``dmget``): batched, honest about failure,
+    with size accounting and guard rails.
+:mod:`gfdl_utils.paths`
+    post-processing path construction and discovery: filename parsing, year
+    filtering, cached directory listings, gap detection.
+:mod:`gfdl_utils.load`
+    opening post-processed output with xarray.
+:mod:`gfdl_utils.mirror`
+    mirroring archive files onto local scratch with ``gcp``.
 
-    if dmget and mirror:
-        raise ValueError("Can not set both `dmget=True` and `mirror=True`.")
+Behaviour changes relative to 0.1.x are listed in the package README.
+"""
 
-    # -------------------------------------------------
-    # Discover variables
-    # -------------------------------------------------
+from __future__ import annotations
 
-    def _discover_available_vars():
+import getpass  # noqa: F401  (historically importable from here)
 
-        allvars = get_varnames(pp, ppname)
+import xarray as xr  # noqa: F401
 
-        if allvars is None:
-            return []
+from .dmf import (  # noqa: F401
+    BATCH_SIZE,
+    DMFError,
+    FileStatus,
+    MAX_CONCURRENT_DMGET,
+    OfflineDataError,
+    StatusReport,
+    dmget,
+    ensure_ondisk,
+    format_bytes,
+    issue_dmget,
+    iter_online,
+    offline_paths,
+    query_all_ondisk,
+    query_dmget,
+    query_ondisk,
+    stat_paths,
+    status_report,
+    wait_until_ondisk,
+)
+from .load import (  # noqa: F401
+    cftime_decoding,
+    load_cftime_variables,
+    open_frompp,
+    open_static,
+)
+from .mirror import mirror_path, mirrored_path  # noqa: F401
+from .paths import (  # noqa: F401
+    PPFile,
+    cache_info,
+    clear_cache,
+    file_timerange,
+    file_years,
+    find_unique_variable,
+    find_variable,
+    find_year_gaps,
+    format_year_gaps,
+    get_allvars,
+    get_local,
+    get_locals,
+    get_pathspp,
+    get_pathspp_list,
+    get_pathstatic,
+    get_ppnames,
+    get_timefrequency,
+    get_varnames,
+    listdir,
+    parse_ppfilename,
+    query_is1x1deg,
+    year_coverage,
+)
 
-        matched = []
-
-        for var in allvars:
-            paths = glob.glob(
-                get_pathspp(pp, ppname, out, local, time, var)
-            )
-
-            if len(paths) > 0:
-                matched.append(var)
-
-        return sorted(matched)
-
-    if add == "*":
-        add = _discover_available_vars()
-
-        if len(add) == 0:
-            raise FileNotFoundError(
-                f"No files found for wildcard add='*' "
-                f"with time pattern '{time}'."
-            )
-
-    if isinstance(add, str):
-        add = [add]
-
-    if not isinstance(add, list):
-        raise TypeError("`add` must be a string or list of strings.")
-
-    # -------------------------------------------------
-    # Collect paths for all variables first
-    # -------------------------------------------------
-
-    paths_by_var = {}
-    all_paths = []
-
-    for var in add:
-
-        paths = sorted(
-            glob.glob(
-                get_pathspp(pp, ppname, out, local, time, var)
-            )
-        )
-
-        if len(paths) == 0:
-            raise FileNotFoundError(
-                f"No files found for variable '{var}' "
-                f"with time pattern '{time}'."
-            )
-
-        paths_by_var[var] = paths
-        all_paths.extend(paths)
-
-    # -------------------------------------------------
-    # Single dmget call
-    # -------------------------------------------------
-
-    if dmget:
-
-        var_string = ", ".join(add)
-
-        print(
-            f"Issuing dmget for variables: {var_string}.",
-            end=" "
-        )
-
-        issue_dmget(all_paths)
-
-        wait_until_ondisk(all_paths, dmget_timeout=dmget_timeout)
-
-        print("Migration complete.")
-
-    elif mirror:
-
-        print(f"Mirroring paths at '{prefix}'.", end=" ")
-
-        mirror_path(all_paths, prefix=prefix)
-
-        for var in add:
-            paths_by_var[var] = [
-                f"{prefix}{p}"
-                for p in paths_by_var[var]
-            ]
-
-        print("Mirroring complete.")
-
-    # -------------------------------------------------
-    # Open datasets
-    # -------------------------------------------------
-
-    datasets = []
-
-    for var in add:
-
-        open_kwargs = dict(kwargs)
-
-        open_kwargs["combine"] = "nested"
-        open_kwargs["concat_dim"] = "time"
-        open_kwargs["coords"] = "minimal"
-        open_kwargs["data_vars"] = "minimal"
-        open_kwargs["compat"] = "override"
-        open_kwargs.setdefault("join", "outer")
-
-        ds_var = xr.open_mfdataset(
-            paths_by_var[var],
-            use_cftime=True,
-            **open_kwargs,
-        )
-
-        datasets.append(ds_var)
-
-    if len(datasets) == 1:
-        return datasets[0]
-
-    return xr.merge(
-        datasets,
-        compat="override",
-        join="outer",
-    )
-
-def get_pathspp(pp,ppname,out,local,time,add):
-    """
-    Create a full path based on details of postprocess path
-    
-    Parameters
-    ----------
-    pp : str
-        Path to postprocess directory
-    ppname : str
-        Name of postrocess file
-    out : str
-        Averaging of postprocess (ts or av)
-    local : str
-        Details of local file structure
-        Commonly e.g. annual/5yr or annual_5yr
-    time : str
-        Time string
-    add : str
-        Additional string in filename
-        If `out` is ts, this would be the variable name
-        If `out` is av, this could be 'ann' (for annual data)
-            or a number corresponding to the month 
-            (for monthly climatology)
-        
-    Returns
-    -------
-    path : str
-        Path including wildcards
-    paths : list, str
-        List of strings corresponding to expanded wildcards
-        
-    """
-    filename = ".".join([ppname,time,add,'nc'])
-    path = "/".join([pp,ppname,out,local,filename])
-    return path.replace("//", "/")
-
-def get_pathstatic(pp,ppname):
-    """
-    
-    Get the path to the static grid file associated with
-    particular postprocessed data.
-    
-    Parameters
-    ----------
-    pp : str
-        Path to postprocess directory
-    ppname : str
-        Name of postrocess file
-    
-    Returns
-    -------
-    path : str
-        Path to static grid
-        
-    """
-    static = ".".join([ppname,'static','nc'])
-    path = "/".join([pp,ppname,static])
-    return path
-
-def open_static(pp,ppname,dmget=False,dmget_timeout=10800):
-    """
-    
-    Get the path to the static grid file associated with
-    particular postprocessed data.
-    
-    Parameters
-    ----------
-    pp : str
-        Path to postprocess directory
-    ppname : str
-        Name of postrocess file
-    
-    Returns
-    -------
-    ds : xarray.Dataset
-        Static grid file dataset
-        
-    """
-    ds_path = get_pathstatic(pp,ppname)
-    if dmget:
-        print("Issuing dmget command to migrate data to disk.", end=" ")
-        issue_dmget([ds_path])
-        wait_until_ondisk([ds_path], dmget_timeout=dmget_timeout)
-        print("Migration complete.")
-    return xr.open_dataset(ds_path)
-
-def issue_dmget(path):
-    """
-    Issue a dmget command to the system for the specified path
-    """
-    if type(path)==list:
-        cmd = f"dmget {' '.join(path)} &"
-    elif type(path)==str:
-        cmd = f"dmget {path} &"
-    out = os.system(cmd)
-    if out != 0:
-        print(f"Warning: dmget launch returned nonzero exit code {out} for command: {cmd}")
-    return out
-
-def query_dmget(user=getpass.getuser(), out=False):
-    """
-    Check `dmwho` output for username. Returns 1 when user still in the queue and 0 if queue is `clean`.
-    Option `out` prints output of command if not empty
-    """
-    cmd = f'dmwho | grep {user}'
-    output = os.popen(cmd).read()
-    if len(output) == 0:
-        return 0
-    else:
-        if out:
-            print(output)
-        return 1
-    
-def query_ondisk(path):
-    """
-    Determine whether the files associated with [path] have been migrated from tape onto disk.
-    Returns a dictionary with keys-value pairs for the path and a boolean: True for disk, False for not.
-    """
-    cmd = f"dmls -l {path}"
-    outputs = os.popen(cmd).read().split('\n')
-    ondisk = {}
-    for output in outputs:
-        if output.strip() == "":
-            continue
-        if ('(REG)' in output) or ('(DUL)' in output):
-            ondisk[output.split(' ')[-1]]=True
-        else:
-            ondisk[output.split(' ')[-1]]=False
-    return ondisk
-
-def query_all_ondisk(paths):
-    """
-    Determine whether all of the files in [paths] have been migrated from tape onto
-    disk. `paths` is an iterable of path strings, each of which is passed to
-    `query_ondisk` (use `query_ondisk` directly for more granular queries).
-
-    A path whose `query_ondisk` returns an empty dict (e.g. a failed or unparseable
-    `dmls` result) is treated as NOT on disk, so callers keep waiting rather than
-    proceeding on a vacuously-true `all([])` result.
-    """
-    return all([all(d.values()) if d else False
-                for d in [query_ondisk(path) for path in paths]])
-
-def wait_until_ondisk(paths, dmget_timeout=10800):
-    """
-    Block until all files in `paths` are resident on disk, polling `query_all_ondisk`
-    with an exponential backoff (starting at 0.1 s, growing by 1.5x up to 5 s) so a
-    long recall does not spawn a flood of `dmls` subprocesses.
-
-    If `dmget_timeout` is not None and the elapsed wait exceeds it (in seconds), raise
-    a TimeoutError naming how many files are still offline along with a couple of
-    example offline paths. Pass `dmget_timeout=None` to wait indefinitely.
-    """
-    start = time_module.time()
-    delay = 0.1
-    while not query_all_ondisk(paths):
-        if (dmget_timeout is not None and
-                (time_module.time() - start) > dmget_timeout):
-            offline = [
-                path for path in paths
-                if not all(query_ondisk(path).values() or [False])
-            ]
-            examples = ", ".join(offline[:2])
-            raise TimeoutError(
-                f"Timed out after {dmget_timeout} seconds waiting for dmget "
-                f"migration to disk: {len(offline)} of {len(paths)} paths still "
-                f"offline (e.g. {examples})."
-            )
-        time_module.sleep(delay)
-        delay = min(delay * 1.5, 5.0)
-
-def mirror_path(path, prefix=f"/vftmp/{getpass.getuser()}"):
-    """
-    Mirror all files in `path` to location on PP/AN given by `prefix` kwarg.
-    Skips any files that have already been mirrored there and waits until all
-    copies have completed.
-    """
-    if type(path)==str:
-        path = [path]
-    if type(path)==list:
-        destination = '/'.join(path[0].split("/")[:-1])
-        
-        if not(os.path.isdir(f"{prefix}{destination}")):
-            os.makedirs(f"{prefix}{destination}", exist_ok=True)
-        path_to_copy = [
-            p for p in path
-            if (not(os.path.isfile(f"{prefix}{p}")) and
-                not(os.path.isfile(f"{prefix}{p}.gcp")))
-        ]
-        time_module.sleep(0.1)
-        cmd = f"gcp --debug {' '.join(path)} {prefix}{destination}/"
-        print(f"Trying command: {cmd}")
-        out = os.system(cmd)
-        path = [f"{prefix}{p}".replace("//","/") for p in path]
-        while any([not(os.path.isfile(p)) for p in path]):
-            time_module.sleep(0.1)
-        time_module.sleep(0.1)
-    else:
-        raise ValueError("path must be str or list of str.")
-    return path
-
-def get_ppnames(pp):
-    """
-    Return the list of folders in the pp directory
-    """
-    return os.listdir(pp+'/')
-
-def get_local(pp,ppname,out,local1priority="monthly",local2priority="5yr"):
-    """
-    Retrieve an unknown local file path in pp subdirectory.
-    """
-    local1 = os.listdir('/'.join([pp,ppname,out]))
-    local1 = local1priority if local1priority in local1 else local1[-1]
-    local2 = os.listdir('/'.join([pp,ppname,out,local1]))
-    local2 = local2priority if local2priority in local2 else local2[-1]
-    return '/'.join([local1,local2])
-
-def get_timefrequency(pp,ppname):
-    """
-    Determine the time frequency of the pp subdirectory based on the local file structure.
-    """
-    return get_local(pp,ppname,'ts').split('/')[0]
-
-def get_varnames(pp,ppname,verbose=False):
-    """
-    Return a list of variables in a specific pp subdirectory.
-    """
-    try:
-        valid = True
-        local1 = os.listdir('/'.join([pp,ppname,'ts']))[0]
-    except:
-        valid = False
-        if verbose:
-            print("No ts directory in "+ppname+". Can't retrieve variables.")
-
-    if valid:
-        local = get_local(pp,ppname,'ts')
-        files = os.listdir('/'.join([pp,ppname,'ts',local]))
-
-        allvars = []
-        for file in files:
-            split = file.split('.')
-            if 'nc' not in split:
-                continue
-            else:
-                varname = split[-2]
-            if varname not in allvars:
-                allvars.append(varname)
-            else:
-                continue
-        return allvars
-
-def get_allvars(pp,verbose=False):
-    """
-    Return a dictionary of all ppnames and their associated variables.
-    """
-    ppnames = get_ppnames(pp)
-    allvars = {}
-    for ppname in ppnames:
-        varnames = get_varnames(pp,ppname,verbose=verbose)
-        if varnames is not None:
-            allvars[ppname]=varnames
-    return allvars
-
-def find_variable(pp, variable, verbose=False):
-    """
-    Find the location of a specific variable in the pp folders.
-    """
-    allvars = get_allvars(pp,verbose=verbose)
-    ppnames = []
-    found=False
-    for ppname in allvars.keys():
-        varnames = allvars[ppname]
-        if variable in varnames:
-            found=True
-            if verbose:
-                print(variable+' is in '+ppname)
-            ppnames.append(ppname)
-        else:
-            continue
-                    
-    if found:
-        return ppnames
-    else:
-        print('No '+variable+' in this pp.')
-
-def find_unique_variable(
-        pp,
-        variable,
-        require=[],
-        ignore=[],
-        unique=True
-    ):
-    if type(ignore) is str:
-        ignore = [ignore]
-    if type(require) is str:
-        require = [require]
-    local_list = [
-        e for e in find_variable(pp, variable)
-        if (all([r in e for r in require]) and
-            not any([s in e for s in ignore]))
-    ]
-    if len(local_list)==1:
-        return local_list[0]
-    elif len(local_list)==0:
-        raise ValueError("No variables matching these constraints available.")
-    elif (len(local_list)>1) and unique:
-        raise ValueError("Ambiguous request; more than one ppname"
-                         f"containing variable '{variable}' satisfies"
-                         f"these constraints: {local_list}.")
-    elif (len(local_list)>1) and not(unique):
-        return local_list
-    
-        
-def query_is1x1deg(ppname):
-    """
-    Determine if variables are interpolated onto a 1x1 grid based on the ppname.
-    The is predicated on the assumption that the ppname for interpolated data ends
-    with '_1x1deg', which is common in current naming conventions.
-    """
-    if ppname.split('_')[-1]=='1x1deg':
-        return True
-    else:
-        return False
+__all__ = [
+    # opening
+    "open_frompp",
+    "open_static",
+    "cftime_decoding",
+    "load_cftime_variables",
+    # paths
+    "get_pathspp",
+    "get_pathspp_list",
+    "get_pathstatic",
+    "get_ppnames",
+    "get_local",
+    "get_locals",
+    "get_timefrequency",
+    "get_varnames",
+    "get_allvars",
+    "find_variable",
+    "find_unique_variable",
+    "find_year_gaps",
+    "format_year_gaps",
+    "year_coverage",
+    "file_years",
+    "file_timerange",
+    "parse_ppfilename",
+    "PPFile",
+    "listdir",
+    "clear_cache",
+    "cache_info",
+    "query_is1x1deg",
+    # tape
+    "issue_dmget",
+    "dmget",
+    "ensure_ondisk",
+    "iter_online",
+    "wait_until_ondisk",
+    "query_ondisk",
+    "query_all_ondisk",
+    "query_dmget",
+    "stat_paths",
+    "status_report",
+    "offline_paths",
+    "format_bytes",
+    "FileStatus",
+    "StatusReport",
+    "DMFError",
+    "OfflineDataError",
+    "BATCH_SIZE",
+    "MAX_CONCURRENT_DMGET",
+    # mirroring
+    "mirror_path",
+    "mirrored_path",
+]
